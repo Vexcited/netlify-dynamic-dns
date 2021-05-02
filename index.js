@@ -3,6 +3,7 @@ const
 	publicIp = require('public-ip'),
 	yargs = require('yargs'),
 	fs = require('fs');
+    fetch = require('node-fetch');
 
 // Get args from CLI.
 const argv = yargs
@@ -17,8 +18,14 @@ const argv = yargs
 		type: 'string'
 	})
 	.option('type', {
-		description: '"A" (IPv4) || "AAAA" (IPv6)',
+		description: '"A" (IPv4) || "AAAA" (IPv6) || "CNAME" (ngrok)',
 		alias: 'a',
+		type: 'string'
+	})
+	.option('ngrok', {
+      description: 'ngrok adress',
+		alias: 'n',
+        default: 'http://localhost:4040',
 		type: 'string'
 	})
 	.argv;
@@ -69,7 +76,31 @@ const getRecords = async (zoneId) => {
  * @param {String} dnsRecordId - Record ID from Zone ID
  * @param {String} ip - New IP
  */
-const updateRecord = async (zoneId, dnsRecordId, ip) => {
+const createRecord = async (zoneId,hostname, ip) => {
+	writeLog(true, "Found a matching record ! Updating it...")
+	try {
+        // Create new DNS Record with type from args.
+        await client.createDnsRecord({
+            zoneId,
+            body: {
+                type: argv.type,
+                hostname: hostname,
+                value: ip
+            }
+        })
+        .then (() =>{
+            writeLog(true, `IP Updated successfully ! Exiting...`)}
+        )
+        .catch (e =>
+            writeLog(false, `Failed to create new record\n${e}`)
+        );
+    }
+	catch (e) {
+		writeLog(false, e);
+	}
+};
+
+const updateRecord = async (zoneId,hostname, dnsRecordId, ip) => {
 	writeLog(true, "Found a matching record ! Updating it...")
 
 	try {
@@ -85,7 +116,7 @@ const updateRecord = async (zoneId, dnsRecordId, ip) => {
 				zoneId,
 				body: {
 					type: argv.type,
-					hostname: argv.hostname,
+					hostname: hostname,
 					value: ip
 				}
 			})
@@ -109,7 +140,7 @@ const updateRecord = async (zoneId, dnsRecordId, ip) => {
  * Update IP with your IP `ip`
  * @param {String} newIp - IP (v4 || v6)
  */
-const updateIP = async (newIp) => {
+const updateIP = async (newIp,hostname) => {
 
 	// Fetching zones, from `token`
 	getZones().then(zones => {
@@ -124,18 +155,25 @@ const updateIP = async (newIp) => {
 				writeLog(true, `If the script exits here, then no records matches with hostname argument.`);
 
 				// For each records fetched: check if `record.hostname`
-				// is matching with `argv.hostname`.
+				// is matching with `hostname`.
+                if(!records.find( rec => rec['hostname'] === hostname )){
+                  if(hostname.includes(zone.name)){
+				      createRecord(zone.id,hostname, newIp);
+                  }
+                }
+                else{
 				records.forEach (record => {
-					if (record.hostname == argv.hostname) {
+					if (record.hostname == hostname) {
 						// Update IP if record value is not the same.
 						if (record.value != newIp) {
-							updateRecord(zone.id, record.id, newIp);
+							updateRecord(zone.id,hostname, record.id, newIp);
 						}
 						else {
 							writeLog(true, `Same IP ([Record] ${record.value} - [Current IP] ${newIp}) ! Exiting...`);
 						}
 					}
 				})
+                }
 			})
 			.catch (e => {
 				writeLog(false, e);
@@ -152,10 +190,21 @@ const updateIP = async (newIp) => {
 const start = async () => {
 	if (argv.type === "A")
 		await publicIp.v4()
-		.then (ip => updateIP(ip))
+		.then (ip => updateIP(ip,argv.hostname))
 	else if (argv.type === "AAAA")
 		await publicIp.v6()
-		.then (ip => updateIP(ip));
+		.then (ip => updateIP(ip,argv.hostname));
+	else if (argv.type === "CNAME")
+        fetch(argv.ngrok+'/api/tunnels', {
+          "method": "GET",
+        })
+        .then(res => res.json())
+        .then(async (json) => {
+          for await (const n of json.tunnels){
+          let cname = new URL(n.public_url)
+          updateIP(cname.hostname,n.name+"."+argv.hostname)
+          }
+        });
 }
 
 // Check if arguments is missing...
